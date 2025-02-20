@@ -1,0 +1,47 @@
+# Environment variables
+.env
+.env.*
+
+# Google Calendar credentials
+credentials.json
+token.pickle
+
+# Python virtual environment
+venv/
+.venv/
+env/
+.env/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# VS Code settings
+.vscode/
+
+# IDE settings
+.idea/
+*.swp
+*.swo
+
+# Log files
+*.log
+logs/
+
+# Local database
+*.db
+*.sqlite
+*.sqlite3
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+*.backup
+
+# Bot specific
+restart_bot.bat
