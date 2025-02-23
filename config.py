@@ -9,4 +9,4 @@ MONGODB_URI = os.getenv('MONGODB_URI')
 GOOGLE_CREDENTIALS_FILE = os.path.join(os.path.dirname(__file__), 'credentials.json')
 SCOPES = ['https://www.googleapis.com/auth/calendar']
 CALENDAR_ID = os.getenv('CALENDAR_ID')
-COMMAND_PREFIX = 'b!'
+COMMAND_PREFIX = ['B!', 'b!']  # Thay đổi từ string thành list

@@ -57,7 +57,8 @@ class CalendarManager:
             print(f"Lỗi xác thực Google Calendar: {str(e)}")
             raise
 
-    async def add_event(self, title, datetime_str, description):
+    async def add_event(self, title, datetime_str, description, calendar_id=None):
+        """Thêm sự kiện với calendar_id tùy chọn"""
         try:
             event_datetime = datetime.strptime(datetime_str, '%Y-%m-%d %H:%M')
             event = {
@@ -73,25 +74,38 @@ class CalendarManager:
                 }
             }
             
-            event = self.service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
+            # Sử dụng calendar_id được chỉ định hoặc mặc định từ config
+            target_calendar = calendar_id or CALENDAR_ID
+            event = self.service.events().insert(
+                calendarId=target_calendar, 
+                body=event
+            ).execute()
             return event['id']
+            
         except Exception as e:
             print(f"Error adding event: {e}")
             return None
 
-    async def delete_event(self, event_id):
+    async def delete_event(self, event_id, calendar_id=None):
+        """Xóa sự kiện với calendar_id tùy chọn"""
         try:
-            self.service.events().delete(calendarId=CALENDAR_ID, eventId=event_id).execute()
+            target_calendar = calendar_id or CALENDAR_ID
+            self.service.events().delete(
+                calendarId=target_calendar, 
+                eventId=event_id
+            ).execute()
             return True
         except Exception as e:
             print(f"Error deleting event: {e}")
             return False
 
-    async def list_events(self):
+    async def list_events(self, calendar_id=None):
+        """Liệt kê sự kiện với calendar_id tùy chọn"""
         try:
+            target_calendar = calendar_id or CALENDAR_ID
             now = datetime.utcnow().isoformat() + 'Z'
             events_result = self.service.events().list(
-                calendarId=CALENDAR_ID, timeMin=now,
+                calendarId=target_calendar, timeMin=now,
                 maxResults=10, singleEvents=True,
                 orderBy='startTime').execute()
             return events_result.get('items', [])

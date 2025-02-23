@@ -45,3 +45,6 @@ Thumbs.db
 
 # Bot specific
 restart_bot.bat
+
+# Encryption key
+.encryption_key

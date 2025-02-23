@@ -108,7 +108,7 @@ class DeleteView(View):
             event_id = event['id']
             
             if await self.calendar_manager.delete_event(event_id):
-                await self.db_manager.delete_event(event_id)
+                self.db_manager.delete_event(event_id)
                 await self.scheduler.remove_reminder(event_id)
                 
                 # Hiện thông báo xóa thành công
@@ -145,14 +145,15 @@ class DeleteView(View):
 
 class ReminderSelectView(View):
     def __init__(self, bot, event_id, title, datetime_str):
-        super().__init__(timeout=120)  # Tăng timeout lên vì người dùng cần chọn 2 lần
+        super().__init__(timeout=120)
         self.bot = bot
         self.event_id = event_id
         self.title = title
         self.datetime_str = datetime_str
-        self.first_reminder = None  # Lưu thời gian nhắc nhở đầu tiên
+        self.first_reminder = None
+        self.repeat_times = 1  # Mặc định nhắc 1 lần
         
-        # Tạo dropdown cho các lựa chọn thời gian
+        # Định nghĩa cả remind_options và repeat_options
         self.remind_options = [
             ("Vào lúc diễn ra", 0, "⏰"),
             ("5 phút trước", 5, "5️⃣"),
@@ -166,11 +167,18 @@ class ReminderSelectView(View):
             ("2 ngày trước", 2880, "📆")
         ]
         
-        # Tạo dropdown đầu tiên
-        self.create_first_dropdown()
+        self.repeat_options = [
+            ("Nhắc 1 lần", 1, "1️⃣"),
+            ("Nhắc 2 lần", 2, "2️⃣"),
+            ("Nhắc 3 lần", 3, "3️⃣"),
+            ("Nhắc 5 lần", 5, "5️⃣")
+        ]
+        
+        # Tạo dropdown đầu tiên cho thời gian
+        self.create_time_dropdown()
 
-    def create_first_dropdown(self):
-        self.clear_items()  # Xóa tất cả items hiện tại
+    def create_time_dropdown(self):
+        self.clear_items()
         
         select_options = [
             discord.SelectOption(
@@ -186,58 +194,22 @@ class ReminderSelectView(View):
             min_values=1,
             max_values=1
         )
-        self.select.callback = self.first_reminder_callback
+        self.select.callback = self.time_callback
         self.add_item(self.select)
 
-    def create_second_dropdown(self):
-        self.clear_items()  # Xóa dropdown đầu tiên
-        
-        # Lọc bỏ option đã chọn ở lần 1
-        remaining_options = [
-            (label, minutes, emoji) 
-            for label, minutes, emoji in self.remind_options
-            if minutes != self.first_reminder
-        ]
-        
-        select_options = [
-            discord.SelectOption(
-                label=label,
-                value=str(minutes),
-                emoji=emoji
-            ) for label, minutes, emoji in remaining_options
-        ]
-        
-        self.select = Select(
-            placeholder="Chọn thời gian nhắc nhở lần 2 (hoặc bỏ qua)...",
-            options=select_options,
-            min_values=1,
-            max_values=1
-        )
-        self.select.callback = self.second_reminder_callback
-        self.add_item(self.select)
-        
-        # Thêm nút bỏ qua
-        skip_button = Button(
-            label="Chỉ nhắc 1 lần",
-            style=discord.ButtonStyle.secondary,
-            emoji="⏭️"
-        )
-        skip_button.callback = self.skip_callback
-        self.add_item(skip_button)
-
-    async def first_reminder_callback(self, interaction: discord.Interaction):
+    async def time_callback(self, interaction: discord.Interaction):
         try:
             self.first_reminder = int(self.select.values[0])
             
-            # Cập nhật embed để hiển thị lựa chọn thứ hai
+            # Sau khi chọn thời gian, hiển thị lựa chọn số lần nhắc
             embed = discord.Embed(
-                title="⏰ Đặt thời gian nhắc nhở",
-                description="Bạn muốn được nhắc thêm lần nữa không?",
+                title="🔄 Số lần nhắc nhở",
+                description="Bạn muốn nhắc nhở mấy lần?\n(Mỗi lần cách nhau 15 giây)",  # Cập nhật mô tả
                 color=discord.Color.blue()
             )
             
-            # Tạo dropdown cho lần chọn thứ hai
-            self.create_second_dropdown()
+            # Tạo dropdown cho số lần nhắc
+            self.create_repeat_dropdown()
             await interaction.response.edit_message(embed=embed, view=self)
             
         except Exception as e:
@@ -246,47 +218,52 @@ class ReminderSelectView(View):
                 ephemeral=True
             )
 
-    async def second_reminder_callback(self, interaction: discord.Interaction):
+    def create_repeat_dropdown(self):
+        self.clear_items()
+        
+        select_options = [
+            discord.SelectOption(
+                label=label,
+                value=str(times),
+                emoji=emoji
+            ) for label, times, emoji in self.repeat_options
+        ]
+        
+        self.select = Select(
+            placeholder="Chọn số lần nhắc...",
+            options=select_options,
+            min_values=1,
+            max_values=1
+        )
+        self.select.callback = self.repeat_callback
+        self.add_item(self.select)
+
+    async def repeat_callback(self, interaction: discord.Interaction):
         try:
-            second_reminder = int(self.select.values[0])
-            await self.set_reminders(interaction, [self.first_reminder, second_reminder])
+            self.repeat_times = int(self.select.values[0])
+            await self.schedule_reminder(interaction)
         except Exception as e:
             await interaction.response.send_message(
                 f"❌ Lỗi: {str(e)}",
                 ephemeral=True
             )
 
-    async def skip_callback(self, interaction: discord.Interaction):
-        await self.set_reminders(interaction, [self.first_reminder])
-
-    async def set_reminders(self, interaction, times):
+    async def schedule_reminder(self, interaction):
         try:
-            # Sắp xếp thời gian để hiển thị theo thứ tự
-            times.sort(reverse=True)
-            
-            # Đặt tất cả các nhắc nhở
-            for minutes in times:
-                await self.bot.scheduler.schedule_reminder(
-                    self.event_id,
-                    self.title,
-                    self.datetime_str,
-                    minutes
-                )
-            
-            # Tạo mô tả về các thời điểm nhắc
-            reminders_text = []
-            for minutes in times:
-                if minutes == 0:
-                    reminders_text.append("ngay lúc diễn ra")
-                else:
-                    reminders_text.append(f"{minutes} phút trước khi diễn ra")
-            
-            reminder_desc = " và ".join(reminders_text)
+            await self.bot.scheduler.schedule_reminder(
+                self.event_id,
+                self.title,
+                self.datetime_str,
+                self.first_reminder,
+                self.repeat_times
+            )
             
             # Hiển thị thông báo thành công
+            reminder_text = "ngay lúc diễn ra" if self.first_reminder == 0 else f"{self.first_reminder} phút trước khi diễn ra"
             embed = discord.Embed(
                 title="⏰ Đã đặt nhắc nhở",
-                description=f"Sự kiện **{self.title}** sẽ được nhắc {reminder_desc}",
+                description=f"Sự kiện **{self.title}** sẽ được nhắc {reminder_text}\n"
+                           f"Số lần nhắc: **{self.repeat_times}** lần",
                 color=discord.Color.green()
             )
             await interaction.response.edit_message(embed=embed, view=None)
@@ -304,7 +281,13 @@ class CalendarBot(commands.Bot):
         intents.message_content = True
         intents.members = True  # Thêm quyền đọc members
         intents.guilds = True   # Thêm quyền đọc guild data
-        super().__init__(command_prefix=COMMAND_PREFIX, intents=intents)
+        
+        # Sử dụng case_insensitive=True để bỏ qua hoa thường trong prefix
+        super().__init__(
+            command_prefix=COMMAND_PREFIX, 
+            intents=intents,
+            case_insensitive=True
+        )
         
         self.calendar_manager = CalendarManager()
         self.db_manager = DatabaseManager()
@@ -317,17 +300,28 @@ class CalendarBot(commands.Bot):
         @self.command(name='add')
         @commands.has_permissions(administrator=True)
         async def add_event(ctx, *, content=""):
+            # Kiểm tra calendar id của user
+            calendar_id = self.db_manager.get_user_calendar(str(ctx.author.id))
+            if not calendar_id:
+                embed = discord.Embed(
+                    title="❌ Chưa cài đặt Calendar",
+                    description="Bạn cần cài đặt Calendar ID trước khi thêm sự kiện. Sử dụng lệnh:\n`b!setcalendar your.email@gmail.com`",
+                    color=discord.Color.red()
+                )
+                await ctx.send(embed=embed)
+                return
+
             if not content:
                 await ctx.send("❌ Vui lòng nhập theo định dạng:\n"
-                             "`b!add <tiêu đề> <dd/mm/yyyy HH:MM> <mô tả>`\n"
+                             "`b!add <tiêu đề> <dd/mm/yyyy HH:MM> [mô tả]`\n"
                              "Ví dụ: `b!add Họp nhóm 25/02/2024 15:30 Họp về dự án mới`")
                 return
                 
             try:
                 # Tách nội dung thành các phần
                 parts = content.split(' ')
-                if len(parts) < 4:  # Ít nhất phải có: tiêu đề, ngày, giờ, mô tả
-                    await ctx.send("❌ Thiếu thông tin! Vui lòng nhập đầy đủ tiêu đề, thời gian và mô tả")
+                if len(parts) < 3:  # Chỉ yêu cầu tiêu đề, ngày và giờ
+                    await ctx.send("❌ Thiếu thông tin! Vui lòng nhập đầy đủ tiêu đề và thời gian")
                     return
 
                 # Lấy ngày và giờ (2 phần tử)
@@ -335,7 +329,7 @@ class CalendarBot(commands.Bot):
                 title = ' '.join(parts[:date_idx])  # Tất cả phần tử trước ngày là tiêu đề
                 date = parts[date_idx]
                 time = parts[date_idx + 1]
-                description = ' '.join(parts[date_idx + 2:])  # Tất cả phần tử sau giờ là mô tả
+                description = ' '.join(parts[date_idx + 2:]) if len(parts) > date_idx + 2 else "Không có mô tả"
                 
                 # Chuyển đổi định dạng ngày giờ
                 try:
@@ -347,7 +341,7 @@ class CalendarBot(commands.Bot):
                     event_id = await self.calendar_manager.add_event(title, datetime_str, description)
                     
                     if event_id:
-                        await self.db_manager.save_event(event_id, title, datetime_str, description, str(ctx.author.id))  # Thêm ID người tạo
+                        self.db_manager.save_event(event_id, title, datetime_str, description, str(ctx.author.id))  # Thêm ID người tạo
                         event_embed = discord.Embed(
                             title="✅ Sự kiện đã được tạo",
                             description=(
@@ -419,7 +413,7 @@ class CalendarBot(commands.Bot):
                 desc = event.get('description', 'Không có mô tả')
                 if len(desc) > 50:
                     desc = desc[:47] + "..."
-
+                
                 description += f"**{idx}. {title}**\n"
                 description += f"⏰ {time_str}\n"
                 description += f"📝 {desc}\n\n"
@@ -467,6 +461,17 @@ class CalendarBot(commands.Bot):
         @self.command(name='test')
         @commands.has_permissions(administrator=True)
         async def add_test_event(ctx):
+            # Kiểm tra calendar id của user
+            calendar_id = self.db_manager.get_user_calendar(str(ctx.author.id))
+            if not calendar_id:
+                embed = discord.Embed(
+                    title="❌ Chưa cài đặt Calendar",
+                    description="Bạn cần cài đặt Calendar ID trước khi thêm sự kiện. Sử dụng lệnh:\n`b!setcalendar your.email@gmail.com`",
+                    color=discord.Color.red()
+                )
+                await ctx.send(embed=embed)
+                return
+
             try:
                 # Tạo sự kiện test cho 15 phút sau
                 now = datetime.now()
@@ -486,7 +491,7 @@ class CalendarBot(commands.Bot):
                 )
                 
                 if event_id:
-                    await self.db_manager.save_event(
+                    self.db_manager.save_event(
                         event_id,
                         test_data['title'],
                         test_data['datetime'],
@@ -515,47 +520,102 @@ class CalendarBot(commands.Bot):
             except Exception as e:
                 await ctx.send(f"Lỗi khi tạo sự kiện test: {str(e)}")
 
+        @self.command(name='setcalendar')
+        async def set_calendar(ctx, calendar_id=None):
+            """Cài đặt Calendar ID cho người dùng"""
+            if not calendar_id:
+                await ctx.send("❌ Vui lòng nhập Calendar ID! Ví dụ:\n`b!setcalendar your.email@gmail.com`")
+                return
+
+            try:
+                # Lưu calendar ID (không cần await)
+                self.db_manager.save_user_calendar(str(ctx.author.id), calendar_id)
+                
+                embed = discord.Embed(
+                    title="✅ Đã cài đặt Calendar",
+                    description=f"Calendar ID của bạn đã được cài đặt thành:\n`{calendar_id}`",
+                    color=discord.Color.green()
+                )
+                embed.set_footer(text="💡 Bot sẽ sử dụng calendar này cho các sự kiện của bạn")
+                await ctx.send(embed=embed)
+                
+            except Exception as e:
+                await ctx.send(f"❌ Lỗi khi cài đặt calendar: {str(e)}")
+
+        @self.command(name='mycalendar')
+        async def show_calendar(ctx):
+            """Hiển thị Calendar ID hiện tại của người dùng"""
+            try:
+                calendar_id = self.db_manager.get_user_calendar(str(ctx.author.id))
+                if (calendar_id):
+                    embed = discord.Embed(
+                        title="📅 Calendar của bạn",
+                        description=f"Calendar ID hiện tại: `{calendar_id}`",
+                        color=discord.Color.blue()
+                    )
+                else:
+                    embed = discord.Embed(
+                        title="❌ Chưa cài đặt Calendar",
+                        description="Bạn chưa cài đặt Calendar ID. Sử dụng lệnh:\n`b!setcalendar your.email@gmail.com`",
+                        color=discord.Color.red()
+                    )
+                await ctx.send(embed=embed)
+                
+            except Exception as e:
+                await ctx.send(f"❌ Lỗi khi kiểm tra calendar: {str(e)}")
+
         @self.command(name='helps')
         async def show_help(ctx):
             embed = discord.Embed(
                 title="📝 Hướng dẫn sử dụng Bot",
-                description="Danh sách các lệnh có sẵn:",
+                description="Bot hỗ trợ cả prefix chữ hoa (B!) và chữ thường (b!)\nDanh sách các lệnh có sẵn:",
                 color=discord.Color.blue()
             )
             
             commands_help = {
-                "b!add": {
-                    "format": "b!add <tiêu đề> <dd/mm/yyyy HH:MM> <mô tả>",
-                    "example": "b!add Họp nhóm 25/02/2024 15:30 Họp về dự án mới",
-                    "desc": "Thêm sự kiện mới vào lịch"
+                "add": {
+                    "format": "<B! hoặc b!>add <tiêu đề> <dd/mm/yyyy HH:MM> [mô tả]",
+                    "example": "B!add Họp nhóm 25/02/2024 15:30 Họp về dự án mới",
+                    "desc": "Thêm sự kiện mới vào lịch (mô tả là tùy chọn)"
                 },
-                "b!list": {  # Đổi tên trong help
-                    "format": "b!list",
-                    "example": "b!list",
-                    "desc": "Xem danh sách các sự kiện sắp tới dưới dạng bảng"
+                "list": {
+                    "format": "<B! hoặc b!>list",
+                    "example": "B!list",
+                    "desc": "Xem danh sách các sự kiện sắp tới"
                 },
-                "b!del": {  # Cập nhật tên lệnh trong help
-                    "format": "b!del",
-                    "example": "b!del",
+                "del": {
+                    "format": "<B! hoặc b!>del",
+                    "example": "B!del",
                     "desc": "Hiện danh sách và xóa sự kiện theo lựa chọn"
                 },
-                "b!test": {
-                    "format": "b!test",
-                    "example": "b!test",
+                "test": {
+                    "format": "<B! hoặc b!>test",
+                    "example": "B!test",
                     "desc": "Tạo sự kiện test (15 phút sau thời điểm hiện tại)"
+                },
+                "setcalendar": {
+                    "format": "<B! hoặc b!>setcalendar <calendar_id>",
+                    "example": "B!setcalendar your.email@gmail.com",
+                    "desc": "Cài đặt Calendar ID của bạn"
+                },
+                "mycalendar": {
+                    "format": "<B! hoặc b!>mycalendar",
+                    "example": "B!mycalendar",
+                    "desc": "Xem Calendar ID hiện tại của bạn"
                 }
             }
             
             for cmd, info in commands_help.items():
                 embed.add_field(
-                    name=f"🔹 {cmd}",
+                    name=f"🔹 Lệnh: {cmd}",
                     value=f"Mô tả: {info['desc']}\n"
                           f"Định dạng: `{info['format']}`\n"
                           f"Ví dụ: `{info['example']}`",
                     inline=False
                 )
             
-            embed.set_footer(text="💡 Các lệnh add và del yêu cầu quyền Administrator")
+            embed.set_footer(text="💡 Các lệnh add và del yêu cầu quyền Administrator\n"
+                                "📝 Bot hỗ trợ cả prefix B! và b!")
             await ctx.send(embed=embed)
 
     async def on_ready(self):
