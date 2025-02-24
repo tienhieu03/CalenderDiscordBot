@@ -9,6 +9,7 @@ class DatabaseManager:
         self.events = self.db.events
         self.user_settings = self.db.user_settings
         self.encryption = EncryptionManager()
+        self.authorized_users = self.db.authorized_users  # Thêm collection mới
 
     def save_event(self, event_id, title, datetime_str, description, user_id=None):
         """Lưu sự kiện với thông tin người tạo"""
@@ -55,3 +56,20 @@ class DatabaseManager:
     def delete_user_calendar(self, user_id: str):
         """Xóa Calendar ID của user"""
         return self.user_settings.delete_one({'user_id': user_id})
+
+    def add_authorized_user(self, user_id: str):
+        """Thêm user được phép sử dụng bot"""
+        return self.authorized_users.update_one(
+            {'user_id': user_id},
+            {'$set': {'authorized': True}},
+            upsert=True
+        )
+
+    def remove_authorized_user(self, user_id: str):
+        """Xóa quyền sử dụng bot của user"""
+        return self.authorized_users.delete_one({'user_id': user_id})
+
+    def is_authorized(self, user_id: str) -> bool:
+        """Kiểm tra user có được phép sử dụng bot không"""
+        user = self.authorized_users.find_one({'user_id': user_id})
+        return bool(user)

@@ -49,7 +49,7 @@ class ContinueDeleteView(View):
         await interaction.response.edit_message(embed=embed, view=None)
 
 class DeleteView(View):
-    def __init__(self, events, calendar_manager, db_manager, scheduler, bot, ctx):
+    def __init__(self, events, calendar_manager, db_manager, scheduler, bot, ctx, calendar_id, user_id):
         super().__init__(timeout=60)
         self.events = events
         self.calendar_manager = calendar_manager
@@ -57,6 +57,8 @@ class DeleteView(View):
         self.scheduler = scheduler
         self.bot = bot
         self.ctx = ctx
+        self.calendar_id = calendar_id  # Thêm calendar_id
+        self.user_id = user_id  # Thêm user_id
         
         # Tạo dropdown menu
         select_options = []
@@ -107,7 +109,7 @@ class DeleteView(View):
             event = self.events[idx]
             event_id = event['id']
             
-            if await self.calendar_manager.delete_event(event_id):
+            if await self.calendar_manager.delete_event(event_id, self.user_id, calendar_id=self.calendar_id):
                 self.db_manager.delete_event(event_id)
                 await self.scheduler.remove_reminder(event_id)
                 
@@ -297,17 +299,64 @@ class CalendarBot(commands.Bot):
         await self.add_commands()
         
     async def add_commands(self):
-        @self.command(name='add')
+        # Tạo decorator kiểm tra quyền sử dụng bot
+        def is_authorized():
+            async def predicate(ctx):
+                # Nếu là admin server hoặc người được authorized
+                return (ctx.author.guild_permissions.administrator or 
+                        self.db_manager.is_authorized(str(ctx.author.id)))
+            return commands.check(predicate)
+
+        @self.command(name='adduser')
+        @commands.has_permissions(administrator=True)  # Chỉ admin mới được thêm user
+        async def add_authorized_user(ctx, user: discord.Member):
+            """Thêm user được phép sử dụng bot"""
+            try:
+                self.db_manager.add_authorized_user(str(user.id))
+                embed = discord.Embed(
+                    title="✅ Đã thêm người dùng",
+                    description=f"User {user.mention} đã được cấp quyền sử dụng bot",
+                    color=discord.Color.green()
+                )
+                await ctx.send(embed=embed)
+            except Exception as e:
+                await ctx.send(f"❌ Lỗi: {str(e)}")
+
+        @self.command(name='removeuser')
         @commands.has_permissions(administrator=True)
+        async def remove_authorized_user(ctx, user: discord.Member):
+            """Xóa quyền sử dụng bot của user"""
+            try:
+                self.db_manager.remove_authorized_user(str(user.id))
+                embed = discord.Embed(
+                    title="✅ Đã xóa người dùng",
+                    description=f"User {user.mention} đã bị thu hồi quyền sử dụng bot",
+                    color=discord.Color.red()
+                )
+                await ctx.send(embed=embed)
+            except Exception as e:
+                await ctx.send(f"❌ Lỗi: {str(e)}")
+
+        # Thêm check is_authorized() vào các lệnh cần kiểm soát
+        @self.command(name='add')
+        @is_authorized()
         async def add_event(ctx, *, content=""):
             # Kiểm tra calendar id của user
             calendar_id = self.db_manager.get_user_calendar(str(ctx.author.id))
             if not calendar_id:
                 embed = discord.Embed(
-                    title="❌ Chưa cài đặt Calendar",
-                    description="Bạn cần cài đặt Calendar ID trước khi thêm sự kiện. Sử dụng lệnh:\n`b!setcalendar your.email@gmail.com`",
+                    title="❌ Calendar chưa được thiết lập",
+                    description=(
+                        "Bạn cần thiết lập Calendar ID trước khi sử dụng bot.\n"
+                        "1. Truy cập https://calendar.google.com\n"
+                        "2. Vào Cài đặt > Cài đặt Calendar của tôi\n"
+                        "3. Cuộn xuống phần Địa chỉ Calendar\n"
+                        "4. Sao chép địa chỉ email\n"
+                        "5. Sử dụng lệnh: `B!setcalendar <email>`"
+                    ),
                     color=discord.Color.red()
                 )
+                embed.set_footer(text="Ví dụ: B!setcalendar your.email@gmail.com")
                 await ctx.send(embed=embed)
                 return
 
@@ -338,7 +387,14 @@ class CalendarBot(commands.Bot):
                     formatted_date = f"{year}-{month}-{day}"
                     datetime_str = f"{formatted_date} {time}"
                     
-                    event_id = await self.calendar_manager.add_event(title, datetime_str, description)
+                    # Truyền user_id vào các hàm calendar
+                    event_id = await self.calendar_manager.add_event(
+                        title, 
+                        datetime_str, 
+                        description,
+                        str(ctx.author.id),  # Thêm user_id
+                        calendar_id=calendar_id  # Thêm calendar_id của user
+                    )
                     
                     if event_id:
                         self.db_manager.save_event(event_id, title, datetime_str, description, str(ctx.author.id))  # Thêm ID người tạo
@@ -373,8 +429,15 @@ class CalendarBot(commands.Bot):
                 await ctx.send(f"❌ Lỗi: {str(e)}")
 
         @self.command(name='list')  # Đổi tên từ events thành list
+        @is_authorized()
         async def list_events(ctx):
-            events = await self.calendar_manager.list_events()
+            # Lấy và sử dụng calendar_id của user
+            calendar_id = self.db_manager.get_user_calendar(str(ctx.author.id))
+            # Truyền user_id vào list_events
+            events = await self.calendar_manager.list_events(
+                str(ctx.author.id),
+                calendar_id=calendar_id
+            )
             if not events:
                 await ctx.send("Không có sự kiện nào sắp tới.")
                 return
@@ -424,10 +487,16 @@ class CalendarBot(commands.Bot):
             await ctx.send(embed=embed)
 
         @self.command(name='del')
-        @commands.has_permissions(administrator=True)
+        @is_authorized()
         async def delete_event(ctx):
             """Xóa sự kiện bằng dropdown menu"""
-            events = await self.calendar_manager.list_events()
+            # Lấy và sử dụng calendar_id của user
+            calendar_id = self.db_manager.get_user_calendar(str(ctx.author.id))
+            # Truyền user_id vào list_events
+            events = await self.calendar_manager.list_events(
+                str(ctx.author.id),
+                calendar_id=calendar_id
+            )
             
             # Lọc bỏ các sự kiện sinh nhật
             filtered_events = [
@@ -453,13 +522,15 @@ class CalendarBot(commands.Bot):
                 self.db_manager,
                 self.scheduler,
                 self,
-                ctx
+                ctx,
+                calendar_id,  # Thêm calendar_id
+                str(ctx.author.id)  # Thêm user_id
             )
             
             await ctx.send(embed=embed, view=view)
 
         @self.command(name='test')
-        @commands.has_permissions(administrator=True)
+        @is_authorized()
         async def add_test_event(ctx):
             # Kiểm tra calendar id của user
             calendar_id = self.db_manager.get_user_calendar(str(ctx.author.id))
@@ -521,22 +592,47 @@ class CalendarBot(commands.Bot):
                 await ctx.send(f"Lỗi khi tạo sự kiện test: {str(e)}")
 
         @self.command(name='setcalendar')
-        async def set_calendar(ctx, calendar_id=None):
+        @is_authorized()
+        async def set_calendar(ctx, email=None):
             """Cài đặt Calendar ID cho người dùng"""
-            if not calendar_id:
-                await ctx.send("❌ Vui lòng nhập Calendar ID! Ví dụ:\n`b!setcalendar your.email@gmail.com`")
+            if not email:
+                embed = discord.Embed(
+                    title="❌ Thiếu email",
+                    description=(
+                        "Vui lòng nhập email của Google Calendar bạn muốn sử dụng:\n"
+                        "`B!setcalendar your.email@gmail.com`\n\n"
+                        "⚠️ Lưu ý: Email này phải là email chính của Google Calendar"
+                    ),
+                    color=discord.Color.red()
+                )
+                embed.set_footer(text="Ví dụ: B!setcalendar example@gmail.com")
+                await ctx.send(embed=embed)
                 return
 
             try:
-                # Lưu calendar ID (không cần await)
-                self.db_manager.save_user_calendar(str(ctx.author.id), calendar_id)
+                # Kiểm tra định dạng email
+                if not ('@' in email and '.' in email):
+                    embed = discord.Embed(
+                        title="❌ Email không hợp lệ",
+                        description="Vui lòng nhập một địa chỉ email hợp lệ",
+                        color=discord.Color.red()
+                    )
+                    await ctx.send(embed=embed)
+                    return
+
+                # Lưu email làm calendar_id
+                self.db_manager.save_user_calendar(str(ctx.author.id), email)
                 
                 embed = discord.Embed(
-                    title="✅ Đã cài đặt Calendar",
-                    description=f"Calendar ID của bạn đã được cài đặt thành:\n`{calendar_id}`",
+                    title="✅ Calendar đã được thiết lập",
+                    description=(
+                        f"Email Calendar của bạn đã được cài đặt thành:\n"
+                        f"`{email}`\n\n"
+                        "⚠️ Lưu ý: Hãy đảm bảo rằng bot đã được cấp quyền truy cập calendar này"
+                    ),
                     color=discord.Color.green()
                 )
-                embed.set_footer(text="💡 Bot sẽ sử dụng calendar này cho các sự kiện của bạn")
+                embed.set_footer(text="💡 Sử dụng B!help để xem hướng dẫn sử dụng")
                 await ctx.send(embed=embed)
                 
             except Exception as e:
@@ -605,6 +701,19 @@ class CalendarBot(commands.Bot):
                 }
             }
             
+            commands_help.update({
+                "adduser": {
+                    "format": "<B! hoặc b!>adduser @mention",
+                    "example": "B!adduser @username",
+                    "desc": "Thêm user được phép sử dụng bot (chỉ admin)"
+                },
+                "removeuser": {
+                    "format": "<B! hoặc b!>removeuser @mention",
+                    "example": "B!removeuser @username", 
+                    "desc": "Thu hồi quyền sử dụng bot (chỉ admin)"
+                }
+            })
+
             for cmd, info in commands_help.items():
                 embed.add_field(
                     name=f"🔹 Lệnh: {cmd}",
@@ -617,6 +726,26 @@ class CalendarBot(commands.Bot):
             embed.set_footer(text="💡 Các lệnh add và del yêu cầu quyền Administrator\n"
                                 "📝 Bot hỗ trợ cả prefix B! và b!")
             await ctx.send(embed=embed)
+
+        @self.command(name='auth')
+        async def auth_calendar(ctx, auth_code: str = None):
+            """Xác thực Google Calendar với mã code"""
+            if not auth_code:
+                await ctx.send("❌ Vui lòng nhập mã xác thực!\nSử dụng lệnh: `B!auth <mã xác thực>`")
+                return
+
+            try:
+                if await self.calendar_manager.verify_auth_code(str(ctx.author.id), auth_code):
+                    embed = discord.Embed(
+                        title="✅ Xác thực thành công",
+                        description="Bạn đã xác thực Google Calendar thành công!\nGiờ bạn có thể sử dụng các lệnh khác.",
+                        color=discord.Color.green()
+                    )
+                    await ctx.send(embed=embed)
+                else:
+                    await ctx.send("❌ Mã xác thực không hợp lệ. Vui lòng thử lại.")
+            except Exception as e:
+                await ctx.send(f"❌ Lỗi xác thực: {str(e)}")
 
     async def on_ready(self):
         print(f'{self.user} đã sẵn sàng!')

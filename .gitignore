@@ -48,3 +48,7 @@ restart_bot.bat
 
 # Encryption key
 .encryption_key
+
+# User tokens
+tokens/*
+tokens/*.pickle
